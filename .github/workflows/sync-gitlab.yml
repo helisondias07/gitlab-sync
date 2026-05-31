@@ -1,0 +1,90 @@
+name: Sync GitLab Contributions
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Sync GitLab contributions
+        run: |
+          python3 << 'EOF'
+          import requests, subprocess, os
+
+          token = os.environ['GITLAB_TOKEN']
+          base_url = 'https://git.fbits.net'
+          headers = {'PRIVATE-TOKEN': token}
+
+          # Busca o ID do usuario autenticado
+          me = requests.get(f'{base_url}/api/v4/user', headers=headers)
+          print(f'User API status: {me.status_code}')
+          print(f'User info: {me.text[:200]}')
+
+          if me.status_code != 200:
+              print('Erro ao autenticar no GitLab!')
+              exit(1)
+
+          user_id = me.json()['id']
+          username = me.json()['username']
+          print(f'Logged as: {username} (id: {user_id})')
+
+          page = 1
+          dates = set()
+          while True:
+              r = requests.get(f'{base_url}/api/v4/users/{user_id}/events?per_page=100&page={page}', headers=headers)
+              print(f'Events page {page}: status {r.status_code}, count {len(r.json()) if r.status_code == 200 else 0}')
+              if r.status_code != 200 or not r.json():
+                  break
+              for e in r.json():
+                  dates.add(e['created_at'][:10])
+              page += 1
+
+          print(f'Found {len(dates)} contribution days')
+
+          subprocess.run(['git', 'config', 'user.email', 'helisondias07@gmail.com'], check=True)
+          subprocess.run(['git', 'config', 'user.name', 'GitLab Sync'], check=True)
+
+          try:
+              existing = subprocess.check_output(['git', 'log', '--pretty=%s']).decode()
+          except:
+              existing = ''
+
+          added = 0
+          for date in sorted(dates):
+              if date in existing:
+                  continue
+              env = os.environ.copy()
+              env['GIT_COMMITTER_DATE'] = f'{date}T12:00:00'
+              env['GIT_AUTHOR_DATE'] = f'{date}T12:00:00'
+              subprocess.run(['git', 'commit', '--allow-empty', '-m', date], env=env, check=True)
+              added += 1
+
+          print(f'Added {added} new commits')
+
+          if added > 0:
+              subprocess.run(['git', 'push'], check=True)
+          else:
+              print('Nothing to push')
+          EOF
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
